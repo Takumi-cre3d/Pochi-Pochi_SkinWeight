@@ -1,0 +1,29 @@
+## .gitignore（Python & Maya用・推奨）
+
+```gitignore
+# Python
+*.pyc
+__pycache__/
+# OS
+.DS_Store
+Thumbs.db
+
+# Maya
+*.log
+*.ma.swatches
+*.autosave
+*.mbsave
+*.mayaSwatches
+*.lock
+*.mel
+*.bak
+
+# VS Code/IDE
+.vscode/
+.idea/
+*.iml
+
+# テスト・検証でできる一時ファイル
+*.tmp
+*.bak
+*.old
