@@ -8,7 +8,8 @@ try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
         QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem,
-        QGroupBox
+        QGroupBox, QStackedWidget, QTableWidget, QTableWidgetItem, QCheckBox, QSlider,
+        QInputDialog, QAbstractItemView
     )
     from PySide6 import QtCore
     import shiboken6
@@ -18,7 +19,8 @@ except ImportError:
         from PySide2.QtWidgets import (
             QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
             QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem,
-            QGroupBox
+            QGroupBox, QStackedWidget, QTableWidget, QTableWidgetItem, QCheckBox, QSlider,
+            QInputDialog, QAbstractItemView
         )
         from PySide2 import QtCore
         import shiboken2
@@ -28,7 +30,8 @@ except ImportError:
             from PyQt6.QtWidgets import (
                 QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
                 QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem,
-                QGroupBox
+                QGroupBox, QStackedWidget, QTableWidget, QTableWidgetItem, QCheckBox, QSlider,
+                QInputDialog, QAbstractItemView
             )
             from PyQt6 import QtCore
             import sip
@@ -37,7 +40,8 @@ except ImportError:
             from PyQt5.QtWidgets import (
                 QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
                 QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem,
-                QGroupBox
+                QGroupBox, QStackedWidget, QTableWidget, QTableWidgetItem, QCheckBox, QSlider,
+                QInputDialog, QAbstractItemView
             )
             from PyQt5 import QtCore
             import sip
