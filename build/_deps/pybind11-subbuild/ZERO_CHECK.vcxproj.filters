@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\TA-Tools\PochiPochi_SkinWeight\build\_deps\pybind11-subbuild\CMakeFiles\7d3be49b7a057b2595dcd3ee184e714a\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{4E5F806F-8B09-3CB2-943D-22452BB6710D}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
