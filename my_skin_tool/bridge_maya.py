@@ -1,3 +1,22 @@
+import maya.cmds as cmds
+import maya.api.OpenMaya as om
+import maya.api.OpenMayaAnim as oma
+import numpy as np
+import json
+import traceback
+
+from . import WeightEngine
+
+def get_skin_cluster(mesh_node):
+    """メッシュからスキンクラスターを取得する"""
+    history = cmds.listHistory(mesh_node, pruneDagObjects=True) or []
+    skins = cmds.ls(history, type="skinCluster")
+    return skins[0] if skins else None
+
+# 開発中のコールバック重複登録を防ぐためのグローバル辞書
+if not hasattr(om, "_pochi_callbacks"):
+    om._pochi_callbacks = {}
+
 class SkinLayerManager:
     def __init__(self, mesh_name):
         self.mesh_name = mesh_name
@@ -39,7 +58,7 @@ class SkinLayerManager:
             cmds.connectAttr(f"{self.skin_name}.message", f"{self.data_node_name}.targetSkin", force=True)
             cmds.addAttr(self.data_node_name, ln="layerMetaData", dt="string")
             
-            # 【変更】baseWeights属性を廃止し、最初のレイヤー(layerWeights_0)として初期ウェイトを保存する
+            # baseWeights属性を廃止し、最初のレイヤー(layerWeights_0)として初期ウェイトを保存する
             cmds.addAttr(self.data_node_name, ln="layerWeights_0", dt="doubleArray")
             cmds.setAttr(f"{self.data_node_name}.layerWeights_0", self._initial_weights.flatten().tolist(), type="doubleArray")
             
@@ -92,7 +111,7 @@ class SkinLayerManager:
     def _apply_to_skincluster(self):
         if not self.layers: return
         
-        # 【変更】合成の起点を BaseLayer (layers[0]) にする
+        # 合成の起点を BaseLayer (layers[0]) にする
         current_weights = self.layers[0]["weights"].copy() * self.layers[0]["opacity"]
         
         # 2枚目以降のレイヤーをブレンドしていく
