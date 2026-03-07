@@ -1,7 +1,6 @@
 import maya.cmds as cmds
 from PySide6 import QtWidgets, QtCore
 
-# MayaのUIと統合するための専用モジュール
 from maya.app.general.mayaMixin import MayaQWidgetBaseMixin 
 from . import bridge_maya
 
@@ -10,7 +9,6 @@ class PochiPochiUI(MayaQWidgetBaseMixin, QtWidgets.QWidget):
         super().__init__(parent)
         self.setWindowTitle("Pochi-Pochi Skin Weight")
         
-        # Qt.Toolを指定することで、Mayaの常に手前に表示され、Maya最小化時に一緒に隠れる
         self.setWindowFlags(QtCore.Qt.Tool)
         self.resize(300, 500)
         
@@ -20,18 +18,15 @@ class PochiPochiUI(MayaQWidgetBaseMixin, QtWidgets.QWidget):
     def setup_ui(self):
         main_layout = QtWidgets.QVBoxLayout(self)
 
-        # 1. メッシュ読み込みボタン
         self.btn_load = QtWidgets.QPushButton("選択したメッシュをロード")
         self.btn_load.clicked.connect(self.load_mesh)
         main_layout.addWidget(self.btn_load)
 
-        # 2. レイヤーリスト
         main_layout.addWidget(QtWidgets.QLabel("■ レイヤー (Layers)"))
         self.list_layers = QtWidgets.QListWidget()
         self.list_layers.currentRowChanged.connect(self.on_layer_selected)
         main_layout.addWidget(self.list_layers)
 
-        # レイヤー追加・不透明度スライダー
         row_layer = QtWidgets.QHBoxLayout()
         self.btn_add_layer = QtWidgets.QPushButton("＋ レイヤー追加")
         self.btn_add_layer.clicked.connect(self.add_layer)
@@ -44,12 +39,10 @@ class PochiPochiUI(MayaQWidgetBaseMixin, QtWidgets.QWidget):
         row_layer.addWidget(self.slider_opacity)
         main_layout.addLayout(row_layer)
 
-        # 3. ボーン(インフルエンス)リスト
         main_layout.addWidget(QtWidgets.QLabel("■ ターゲットボーン (Bones)"))
         self.list_bones = QtWidgets.QListWidget()
         main_layout.addWidget(self.list_bones)
 
-        # 4. Pochi-Pochi ボタン群
         main_layout.addWidget(QtWidgets.QLabel("■ ウェイト加算/減算"))
         grid_btns = QtWidgets.QGridLayout()
         
@@ -70,14 +63,15 @@ class PochiPochiUI(MayaQWidgetBaseMixin, QtWidgets.QWidget):
         
         main_layout.addLayout(grid_btns)
 
-    # =========================================================
-    # UIのロジック部分
-    # =========================================================
     def load_mesh(self):
         sel = cmds.ls(selection=True, objectsOnly=True)
         if not sel:
             cmds.warning("メッシュを選択してください。")
             return
+            
+        # 古いマネージャーのコールバックを解放
+        if self.manager:
+            self.manager.release()
             
         mesh_name = sel[0]
         try:
@@ -90,12 +84,10 @@ class PochiPochiUI(MayaQWidgetBaseMixin, QtWidgets.QWidget):
     def refresh_ui(self):
         if not self.manager: return
         
-        # レイヤーリストの更新
         self.list_layers.clear()
         for i, layer in enumerate(self.manager.layers):
             self.list_layers.addItem(f"{i}: {layer['name']} (Opacity: {layer['opacity']})")
         
-        # ボーンリストの更新 (SkinClusterから取得)
         self.list_bones.clear()
         bones = cmds.skinCluster(self.manager.skin_name, query=True, influence=True) or []
         for i, bone in enumerate(bones):
@@ -129,15 +121,17 @@ class PochiPochiUI(MayaQWidgetBaseMixin, QtWidgets.QWidget):
             cmds.warning("レイヤーとボーンを選択してください。")
             return
 
-        # Mayaから選択中の頂点IDを取得する
-        sel_vtx = cmds.filterExpand(selectionMask=31) # 31 = Polygon Vertex
+        sel_vtx = cmds.filterExpand(selectionMask=31)
         if not sel_vtx:
             cmds.warning("対象の頂点を選択してください。")
             return
             
-        # "pSphere1.vtx[5]" のような文字列から数字(5)だけを抽出
         vtx_ids = [int(v.split('[')[1].split(']')[0]) for v in sel_vtx]
-        
-        # C++エンジン経由で一括処理
         self.manager.edit_layer_weights_batch(layer_idx, vtx_ids, bone_idx, value)
         cmds.refresh()
+
+    def closeEvent(self, event):
+        """ウィンドウを閉じる時にコールバックを確実にお掃除する"""
+        if self.manager:
+            self.manager.release()
+        super().closeEvent(event)
