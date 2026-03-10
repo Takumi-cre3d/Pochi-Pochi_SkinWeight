@@ -1,14 +1,47 @@
 import maya.cmds as cmds
 from PySide6 import QtWidgets, QtCore
-
 from maya.app.general.mayaMixin import MayaQWidgetBaseMixin 
 from . import bridge_maya
 
+# =========================================================
+# UI表示用のモデル (MVCのModel層)
+# =========================================================
+class LayerListModel(QtCore.QAbstractListModel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._layers = []
+
+    def set_layers(self, layers):
+        self.beginResetModel()
+        self._layers = layers
+        self.endResetModel()
+
+    def rowCount(self, parent=QtCore.QModelIndex()):
+        return len(self._layers)
+
+    def data(self, index, role=QtCore.Qt.DisplayRole):
+        if not index.isValid() or not (0 <= index.row() < len(self._layers)):
+            return None
+        
+        layer = self._layers[index.row()]
+        
+        # DisplayRole: リストに表示される文字列
+        if role == QtCore.Qt.DisplayRole:
+            return f"{index.row()}: {layer['name']} (Opacity: {layer['opacity']:.2f})"
+        
+        # UserRole: 実際のデータ自体を取り出す用
+        if role == QtCore.Qt.UserRole:
+            return layer
+            
+        return None
+
+# =========================================================
+# メインUI (MVCのView & Controller層)
+# =========================================================
 class PochiPochiUI(MayaQWidgetBaseMixin, QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Pochi-Pochi Skin Weight")
-        
         self.setWindowFlags(QtCore.Qt.Tool)
         self.resize(300, 500)
         
@@ -22,10 +55,13 @@ class PochiPochiUI(MayaQWidgetBaseMixin, QtWidgets.QWidget):
         self.btn_load.clicked.connect(self.load_mesh)
         main_layout.addWidget(self.btn_load)
 
+        # QListWidget から QListView + QAbstractListModel への変更
         main_layout.addWidget(QtWidgets.QLabel("■ レイヤー (Layers)"))
-        self.list_layers = QtWidgets.QListWidget()
-        self.list_layers.currentRowChanged.connect(self.on_layer_selected)
-        main_layout.addWidget(self.list_layers)
+        self.list_view_layers = QtWidgets.QListView()
+        self.layer_model = LayerListModel(self)
+        self.list_view_layers.setModel(self.layer_model)
+        self.list_view_layers.selectionModel().selectionChanged.connect(self.on_layer_selected)
+        main_layout.addWidget(self.list_view_layers)
 
         row_layer = QtWidgets.QHBoxLayout()
         self.btn_add_layer = QtWidgets.QPushButton("＋ レイヤー追加")
@@ -69,7 +105,6 @@ class PochiPochiUI(MayaQWidgetBaseMixin, QtWidgets.QWidget):
             cmds.warning("メッシュを選択してください。")
             return
             
-        # 古いマネージャーのコールバックを解放
         if self.manager:
             self.manager.release()
             
@@ -84,41 +119,50 @@ class PochiPochiUI(MayaQWidgetBaseMixin, QtWidgets.QWidget):
     def refresh_ui(self):
         if not self.manager: return
         
-        self.list_layers.clear()
-        for i, layer in enumerate(self.manager.layers):
-            self.list_layers.addItem(f"{i}: {layer['name']} (Opacity: {layer['opacity']})")
+        # モデルにレイヤーリストを渡すだけでUIが自動更新される
+        self.layer_model.set_layers(self.manager.layers)
         
         self.list_bones.clear()
         bones = cmds.skinCluster(self.manager.skin_name, query=True, influence=True) or []
         for i, bone in enumerate(bones):
             self.list_bones.addItem(f"{i}: {bone}")
 
-    def on_layer_selected(self, row):
-        if row >= 0 and self.manager:
-            op = self.manager.layers[row]["opacity"]
-            self.slider_opacity.setValue(int(op * 100))
+    def on_layer_selected(self, selected, deselected):
+        indexes = selected.indexes()
+        if indexes and self.manager:
+            layer_data = self.layer_model.data(indexes[0], QtCore.Qt.UserRole)
+            if layer_data:
+                self.slider_opacity.setValue(int(layer_data["opacity"] * 100))
 
     def add_layer(self):
         if self.manager:
-            self.manager.add_layer(name="Anim_Layer", opacity=1.0)
+            new_idx = self.manager.add_layer(name="Anim_Layer", opacity=1.0)
             self.refresh_ui()
-            self.list_layers.setCurrentRow(len(self.manager.layers) - 1)
+            
+            # 追加したレイヤーを選択状態にする
+            index = self.layer_model.index(new_idx, 0)
+            self.list_view_layers.selectionModel().setCurrentIndex(index, QtCore.QItemSelectionModel.ClearAndSelect)
 
     def change_opacity(self):
-        row = self.list_layers.currentRow()
-        if row >= 0 and self.manager:
+        indexes = self.list_view_layers.selectionModel().selectedIndexes()
+        if indexes and self.manager:
+            row = indexes[0].row()
             val = self.slider_opacity.value() / 100.0
             self.manager.set_layer_opacity(row, val)
-            self.refresh_ui()
+            self.refresh_ui() # モデルを更新して数値を反映
 
     def apply_weight(self, value):
         if not self.manager: return
         
-        layer_idx = self.list_layers.currentRow()
-        bone_idx = self.list_bones.currentRow()
+        indexes = self.list_view_layers.selectionModel().selectedIndexes()
+        if not indexes:
+            cmds.warning("レイヤーを選択してください。")
+            return
+        layer_idx = indexes[0].row()
         
-        if layer_idx < 0 or bone_idx < 0:
-            cmds.warning("レイヤーとボーンを選択してください。")
+        bone_idx = self.list_bones.currentRow()
+        if bone_idx < 0:
+            cmds.warning("ボーンを選択してください。")
             return
 
         sel_vtx = cmds.filterExpand(selectionMask=31)
@@ -131,7 +175,6 @@ class PochiPochiUI(MayaQWidgetBaseMixin, QtWidgets.QWidget):
         cmds.refresh()
 
     def closeEvent(self, event):
-        """ウィンドウを閉じる時にコールバックを確実にお掃除する"""
         if self.manager:
             self.manager.release()
         super().closeEvent(event)
