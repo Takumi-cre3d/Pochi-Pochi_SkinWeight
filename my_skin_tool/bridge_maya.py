@@ -80,35 +80,106 @@ class SkinClusterAdapter:
         cmds.dgdirty(self.skin_name)
 
 # =========================================================
-# 3. DataNodeStore: networkノードのI/O管理
+# 3. DataNodeStore: networkノードの一意接続探索・I/O管理・マイグレーション
 # =========================================================
 class DataNodeStore:
     def __init__(self, skin_name):
         self.skin_name = skin_name
-        self.node_name = f"{skin_name}_PochiData"
+        self.node_name = None  # 初期化時は未定 (探索して一意に決定する)
+        self.attr_pochi_link = "pochiData" # SkinCluster側に生やすメッセージ属性
 
     def ensure_exists(self, initial_weights_np):
-        if not cmds.objExists(self.node_name):
-            cmds.createNode("network", name=self.node_name)
-            cmds.addAttr(self.node_name, ln="isPochiData", at="bool")
-            cmds.addAttr(self.node_name, ln="targetSkin", at="message")
-            cmds.connectAttr(f"{self.skin_name}.message", f"{self.node_name}.targetSkin", force=True)
-            cmds.addAttr(self.node_name, ln="layerMetaData", dt="string")
-            
-            cmds.addAttr(self.node_name, ln="layerWeights_0", dt="doubleArray")
-            cmds.setAttr(f"{self.node_name}.layerWeights_0", initial_weights_np.flatten().tolist(), type="doubleArray")
-            
-            # === schema.py を使って初期メタデータを保存 ===
-            init_meta = [{schema.KEY_NAME: "BaseLayer", schema.KEY_OPACITY: 1.0}]
-            cmds.setAttr(f"{self.node_name}.layerMetaData", schema.dump_metadata(init_meta), type="string")
-            
+        """ノードを接続ベースで探索し、なければ作成・修復を行う"""
+        
+        # 1. ノードの探索または作成
+        self.node_name = self._get_or_create_node()
+        
+        # 2. データのマイグレーションと自己修復
+        self._migrate_if_needed(initial_weights_np)
+        
         sel = om.MSelectionList()
         sel.add(self.node_name)
         return sel.getDependNode(0)
 
+    def _get_or_create_node(self):
+        """SkinClusterのメッセージ接続を真実の情報源(SSOT)としてノードを特定する"""
+        
+        # SkinCluster側に専用のリンク属性(message)がなければ作る
+        if not cmds.attributeQuery(self.attr_pochi_link, node=self.skin_name, exists=True):
+            cmds.addAttr(self.skin_name, ln=self.attr_pochi_link, at="message")
+
+        # 探索ルート1: SkinClusterからの接続を辿る (最も確実)
+        connections = cmds.listConnections(f"{self.skin_name}.{self.attr_pochi_link}", source=True, destination=False)
+        if connections:
+            return connections[0]
+            
+        # 探索ルート2(フォールバック): 繋がっていない場合、古い命名規則のノードを探す
+        fallback_name = f"{self.skin_name}_PochiData"
+        if cmds.objExists(fallback_name):
+            # 見つけた旧ノードをSkinClusterに接続し直し、正規化(修復)する
+            cmds.connectAttr(f"{fallback_name}.message", f"{self.skin_name}.{self.attr_pochi_link}", force=True)
+            om.MGlobal.displayInfo(f"[PochiPochi] 既存のデータノードをSkinClusterに再接続(修復)しました: {fallback_name}")
+            return fallback_name
+            
+        # 探索ルート3: 完全新規作成
+        new_node = cmds.createNode("network", name=fallback_name)
+        cmds.addAttr(new_node, ln="isPochiData", at="bool")
+        cmds.setAttr(f"{new_node}.isPochiData", True)
+        cmds.addAttr(new_node, ln="targetSkin", at="message")
+        
+        # 双方向のコネクションを結ぶ (SkinCluster <--> PochiData)
+        cmds.connectAttr(f"{self.skin_name}.message", f"{new_node}.targetSkin", force=True)
+        cmds.connectAttr(f"{new_node}.message", f"{self.skin_name}.{self.attr_pochi_link}", force=True)
+        
+        cmds.addAttr(new_node, ln="layerMetaData", dt="string")
+        return new_node
+
+    def _migrate_if_needed(self, initial_weights_np):
+        """古いデータ形式のコンバートと、破損したメタデータの再構築を行う"""
+        
+        has_base_old = cmds.attributeQuery("baseWeights", node=self.node_name, exists=True)
+        has_layer_0 = cmds.attributeQuery("layerWeights_0", node=self.node_name, exists=True)
+        
+        # 1. ウェイト属性のマイグレーション
+        if has_base_old and not has_layer_0:
+            # 旧ツールの baseWeights がある場合は layerWeights_0 にコンバート
+            om.MGlobal.displayInfo(f"[PochiPochi] 旧フォーマットのウェイトデータを移行します: {self.node_name}")
+            old_data = cmds.getAttr(f"{self.node_name}.baseWeights")
+            cmds.addAttr(self.node_name, ln="layerWeights_0", dt="doubleArray")
+            cmds.setAttr(f"{self.node_name}.layerWeights_0", old_data, type="doubleArray")
+            # (旧 baseWeights 属性は安全のため一旦残す方針とします)
+            
+        elif not has_layer_0:
+            # 完全新規のノードの場合は、引数の初期ウェイトを流し込む
+            cmds.addAttr(self.node_name, ln="layerWeights_0", dt="doubleArray")
+            cmds.setAttr(f"{self.node_name}.layerWeights_0", initial_weights_np.flatten().tolist(), type="doubleArray")
+
+        # 2. メタデータの自己修復
+        has_meta_attr = cmds.attributeQuery("layerMetaData", node=self.node_name, exists=True)
+        if not has_meta_attr:
+            cmds.addAttr(self.node_name, ln="layerMetaData", dt="string")
+            
+        meta_str = cmds.getAttr(f"{self.node_name}.layerMetaData")
+        layers_meta = schema.load_metadata(meta_str)
+        
+        if not layers_meta:
+            # メタデータが空、またはパースに失敗(破損)している場合、アトリビュートの存在から強制再構築する
+            om.MGlobal.displayWarning(f"[PochiPochi] メタデータをアトリビュートから再構築します: {self.node_name}")
+            rebuilt_meta = []
+            i = 0
+            while cmds.attributeQuery(f"layerWeights_{i}", node=self.node_name, exists=True):
+                name = "BaseLayer" if i == 0 else f"Layer_{i}"
+                rebuilt_meta.append({schema.KEY_NAME: name, schema.KEY_OPACITY: 1.0})
+                i += 1
+                
+            if not rebuilt_meta:
+                rebuilt_meta = [{schema.KEY_NAME: "BaseLayer", schema.KEY_OPACITY: 1.0}]
+                
+            cmds.setAttr(f"{self.node_name}.layerMetaData", schema.dump_metadata(rebuilt_meta), type="string")
+
+    # load_layers, save_layer, save_metadata は self.node_name を使う点以外はそのまま
     def load_layers(self, num_vertices, num_influences):
         metadata_str = cmds.getAttr(f"{self.node_name}.layerMetaData")
-        # === schema.py を使ってメタデータを読み込み・マイグレーション ===
         metadata = schema.load_metadata(metadata_str)
         
         layers = []
@@ -132,9 +203,8 @@ class DataNodeStore:
         cmds.setAttr(f"{self.node_name}.{attr_name}", weights_np.flatten().tolist(), type="doubleArray")
 
     def save_metadata(self, layers_list):
-        # === schema.py を使って保存 ===
         cmds.setAttr(f"{self.node_name}.layerMetaData", schema.dump_metadata(layers_list), type="string")
-
+        
 # =========================================================
 # 5. SkinLayerManager: 統括コントローラー
 # =========================================================
