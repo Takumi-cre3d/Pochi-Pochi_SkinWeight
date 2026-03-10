@@ -1,11 +1,9 @@
-# my_skin_tool/bridge_maya.py
 import maya.cmds as cmds
 import maya.api.OpenMaya as om
 import maya.api.OpenMayaAnim as oma
 import numpy as np
 import traceback
 
-# === 分割したDCC非依存モジュール群のインポート ===
 from . import core_engine
 from . import model
 from . import schema
@@ -80,21 +78,16 @@ class SkinClusterAdapter:
         cmds.dgdirty(self.skin_name)
 
 # =========================================================
-# 3. DataNodeStore: networkノードの一意接続探索・I/O管理・マイグレーション
+# 3. DataNodeStore: 堅牢な一意接続探索・I/O管理・マイグレーション
 # =========================================================
 class DataNodeStore:
     def __init__(self, skin_name):
         self.skin_name = skin_name
-        self.node_name = None  # 初期化時は未定 (探索して一意に決定する)
-        self.attr_pochi_link = "pochiData" # SkinCluster側に生やすメッセージ属性
+        self.node_name = None  
+        self.attr_pochi_link = "pochiData"
 
     def ensure_exists(self, initial_weights_np):
-        """ノードを接続ベースで探索し、なければ作成・修復を行う"""
-        
-        # 1. ノードの探索または作成
         self.node_name = self._get_or_create_node()
-        
-        # 2. データのマイグレーションと自己修復
         self._migrate_if_needed(initial_weights_np)
         
         sel = om.MSelectionList()
@@ -102,85 +95,105 @@ class DataNodeStore:
         return sel.getDependNode(0)
 
     def _get_or_create_node(self):
-        """SkinClusterのメッセージ接続を真実の情報源(SSOT)としてノードを特定する"""
-        
-        # SkinCluster側に専用のリンク属性(message)がなければ作る
         if not cmds.attributeQuery(self.attr_pochi_link, node=self.skin_name, exists=True):
             cmds.addAttr(self.skin_name, ln=self.attr_pochi_link, at="message")
 
-        # 探索ルート1: SkinClusterからの接続を辿る (最も確実)
+        # 探索ルート1: 接続から辿る
         connections = cmds.listConnections(f"{self.skin_name}.{self.attr_pochi_link}", source=True, destination=False)
         if connections:
-            return connections[0]
-            
-        # 探索ルート2(フォールバック): 繋がっていない場合、古い命名規則のノードを探す
+            candidate = connections[0]
+            if self._validate_node(candidate):
+                return candidate
+            else:
+                cmds.disconnectAttr(f"{candidate}.message", f"{self.skin_name}.{self.attr_pochi_link}")
+
+        # 探索ルート2: 名前でフォールバック探索
         fallback_name = f"{self.skin_name}_PochiData"
         if cmds.objExists(fallback_name):
-            # 見つけた旧ノードをSkinClusterに接続し直し、正規化(修復)する
-            cmds.connectAttr(f"{fallback_name}.message", f"{self.skin_name}.{self.attr_pochi_link}", force=True)
-            om.MGlobal.displayInfo(f"[PochiPochi] 既存のデータノードをSkinClusterに再接続(修復)しました: {fallback_name}")
-            return fallback_name
-            
+            if self._validate_node(fallback_name, allow_empty_target=True):
+                # 見つかった正当なノードと双方向接続を結び直す（正規化）
+                cmds.connectAttr(f"{fallback_name}.message", f"{self.skin_name}.{self.attr_pochi_link}", force=True)
+                
+                # ターゲットが空だった場合のために張り直す
+                if cmds.attributeQuery("targetSkin", node=fallback_name, exists=True):
+                    try:
+                        cmds.connectAttr(f"{self.skin_name}.message", f"{fallback_name}.targetSkin", force=True)
+                    except RuntimeError:
+                        pass # 既に繋がっていれば無視
+                        
+                om.MGlobal.displayInfo(f"[PochiPochi] 既存ノードを再接続(修復)しました: {fallback_name}")
+                return fallback_name
+
         # 探索ルート3: 完全新規作成
         new_node = cmds.createNode("network", name=fallback_name)
         cmds.addAttr(new_node, ln="isPochiData", at="bool")
         cmds.setAttr(f"{new_node}.isPochiData", True)
         cmds.addAttr(new_node, ln="targetSkin", at="message")
         
-        # 双方向のコネクションを結ぶ (SkinCluster <--> PochiData)
         cmds.connectAttr(f"{self.skin_name}.message", f"{new_node}.targetSkin", force=True)
         cmds.connectAttr(f"{new_node}.message", f"{self.skin_name}.{self.attr_pochi_link}", force=True)
-        
         cmds.addAttr(new_node, ln="layerMetaData", dt="string")
         return new_node
 
-    def _migrate_if_needed(self, initial_weights_np):
-        """古いデータ形式のコンバートと、破損したメタデータの再構築を行う"""
+    def _validate_node(self, node_name, allow_empty_target=False):
+        """ノードが本当にこのSkinCluster用のPochiDataか検証する"""
         
+        # 以前のバージョンは値がFalseのままだったため、値ではなく「属性の存在」だけでPochiDataとみなす
+        if not cmds.attributeQuery("isPochiData", node=node_name, exists=True): 
+            return False
+
+        if cmds.attributeQuery("targetSkin", node=node_name, exists=True):
+            targets = cmds.listConnections(f"{node_name}.targetSkin", source=False, destination=True)
+            if targets:
+                # 別のSkinClusterに繋がっている場合は共有/複製事故として弾く
+                if targets[0] != self.skin_name:
+                    om.MGlobal.displayWarning(f"[PochiPochi] 共有事故を検知。{node_name} は {targets[0]} のデータです。")
+                    return False
+            elif not allow_empty_target:
+                return False
+                
+        return True
+
+    def _migrate_if_needed(self, initial_weights_np):
+        """古いデータ形式のコンバートと、破損したメタデータの自己修復を行う"""
+        
+        # 旧ノードだった場合、isPochiDataの値を明示的にTrueに直しておく
+        if cmds.attributeQuery("isPochiData", node=self.node_name, exists=True):
+            cmds.setAttr(f"{self.node_name}.isPochiData", True)
+
         has_base_old = cmds.attributeQuery("baseWeights", node=self.node_name, exists=True)
         has_layer_0 = cmds.attributeQuery("layerWeights_0", node=self.node_name, exists=True)
         
-        # 1. ウェイト属性のマイグレーション
         if has_base_old and not has_layer_0:
-            # 旧ツールの baseWeights がある場合は layerWeights_0 にコンバート
-            om.MGlobal.displayInfo(f"[PochiPochi] 旧フォーマットのウェイトデータを移行します: {self.node_name}")
+            om.MGlobal.displayInfo(f"[PochiPochi] 旧フォーマットを移行します: {self.node_name}")
             old_data = cmds.getAttr(f"{self.node_name}.baseWeights")
             cmds.addAttr(self.node_name, ln="layerWeights_0", dt="doubleArray")
             cmds.setAttr(f"{self.node_name}.layerWeights_0", old_data, type="doubleArray")
-            # (旧 baseWeights 属性は安全のため一旦残す方針とします)
-            
         elif not has_layer_0:
-            # 完全新規のノードの場合は、引数の初期ウェイトを流し込む
             cmds.addAttr(self.node_name, ln="layerWeights_0", dt="doubleArray")
             cmds.setAttr(f"{self.node_name}.layerWeights_0", initial_weights_np.flatten().tolist(), type="doubleArray")
 
-        # 2. メタデータの自己修復
         has_meta_attr = cmds.attributeQuery("layerMetaData", node=self.node_name, exists=True)
-        if not has_meta_attr:
+        if not has_meta_attr: 
             cmds.addAttr(self.node_name, ln="layerMetaData", dt="string")
             
         meta_str = cmds.getAttr(f"{self.node_name}.layerMetaData")
         layers_meta = schema.load_metadata(meta_str)
         
         if not layers_meta:
-            # メタデータが空、またはパースに失敗(破損)している場合、アトリビュートの存在から強制再構築する
-            om.MGlobal.displayWarning(f"[PochiPochi] メタデータをアトリビュートから再構築します: {self.node_name}")
             rebuilt_meta = []
             i = 0
             while cmds.attributeQuery(f"layerWeights_{i}", node=self.node_name, exists=True):
-                name = "BaseLayer" if i == 0 else f"Layer_{i}"
-                rebuilt_meta.append({schema.KEY_NAME: name, schema.KEY_OPACITY: 1.0})
+                rebuilt_meta.append({schema.KEY_NAME: "BaseLayer" if i==0 else f"Layer_{i}", schema.KEY_OPACITY: 1.0})
                 i += 1
-                
-            if not rebuilt_meta:
+            if not rebuilt_meta: 
                 rebuilt_meta = [{schema.KEY_NAME: "BaseLayer", schema.KEY_OPACITY: 1.0}]
-                
             cmds.setAttr(f"{self.node_name}.layerMetaData", schema.dump_metadata(rebuilt_meta), type="string")
 
-    # load_layers, save_layer, save_metadata は self.node_name を使う点以外はそのまま
     def load_layers(self, num_vertices, num_influences):
         metadata_str = cmds.getAttr(f"{self.node_name}.layerMetaData")
         metadata = schema.load_metadata(metadata_str)
+        expected_size = num_vertices * num_influences
         
         layers = []
         for i, meta in enumerate(metadata):
@@ -188,6 +201,11 @@ class DataNodeStore:
             if cmds.attributeQuery(attr_name, node=self.node_name, exists=True):
                 weights_flat = cmds.getAttr(f"{self.node_name}.{attr_name}")
                 if weights_flat:
+                    # インフルエンス増減による配列サイズ不一致(サイレント破壊)の防止
+                    if len(weights_flat) != expected_size:
+                        om.MGlobal.displayError(f"[PochiPochi] {attr_name} の配列サイズが合いません(頂点やボーン数が変化した可能性があります)。このレイヤーはロードされません。")
+                        continue
+                        
                     np_weights = np.array(weights_flat, dtype=np.float32).reshape((num_vertices, num_influences))
                     layers.append({
                         schema.KEY_NAME: meta.get(schema.KEY_NAME, f"Layer_{i}"), 
@@ -204,14 +222,13 @@ class DataNodeStore:
 
     def save_metadata(self, layers_list):
         cmds.setAttr(f"{self.node_name}.layerMetaData", schema.dump_metadata(layers_list), type="string")
-        
+
 # =========================================================
 # 5. SkinLayerManager: 統括コントローラー
 # =========================================================
 class SkinLayerManager:
     def __init__(self, mesh_name):
         self.mesh_name = mesh_name
-        # === core_engine.py からエンジンを取得 ===
         self.engine = core_engine.PochiCoreEngine()
         
         skin_name = get_skin_cluster(self.mesh_name)
@@ -221,7 +238,6 @@ class SkinLayerManager:
         self.adapter = SkinClusterAdapter(self.mesh_name, skin_name)
         self.store = DataNodeStore(skin_name)
         
-        # === model.py から LayerStack を取得 ===
         self.stack = model.LayerStack(self.engine, self.adapter.num_vertices, self.adapter.num_influences)
         
         self._is_editing = False
