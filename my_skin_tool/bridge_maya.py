@@ -138,12 +138,13 @@ class DataNodeStore:
     def _validate_node(self, node_name, allow_empty_target=False):
         """ノードが本当にこのSkinCluster用のPochiDataか検証する"""
         
-        # 以前のバージョンは値がFalseのままだったため、値ではなく「属性の存在」だけでPochiDataとみなす
         if not cmds.attributeQuery("isPochiData", node=node_name, exists=True): 
             return False
 
         if cmds.attributeQuery("targetSkin", node=node_name, exists=True):
-            targets = cmds.listConnections(f"{node_name}.targetSkin", source=False, destination=True)
+            # 【修正】上流（Source）である SkinCluster を取得するように修正
+            targets = cmds.listConnections(f"{node_name}.targetSkin", source=True, destination=False) or []
+            
             if targets:
                 # 別のSkinClusterに繋がっている場合は共有/複製事故として弾く
                 if targets[0] != self.skin_name:
